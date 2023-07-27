@@ -1,0 +1,163 @@
+# `3xx`대 `HTTP Status`는 무엇을 의미하는지 설명해주세요.
+
+`3xx`대 `HTTP Status`는 `Redirection`을 의미합니다. `Redirection`은 클라이언트가 요청한 리소스가 새로운 위치이나 다른 `URL`로 이동되었을 때, 새로운 위치의 `URL`로
+클라이언트를 보내는 것을 뜻합니다.
+
+# `Server`에서 `3xx`응답을 한 경우 `Client:Brower`는 어떻게 동작하나요?
+
+먼저 `3xx` `HttpStatus`는 `Location` 헤더와 함께 사용됩니다. `Location` 헤더는 클라이언트가 리소스를 찾을 수 있는 `URL`을
+제공합니다. `Server`에서 `3xx` `HttpStatus`와 `Location` 헤더를 응답하면 `Client:Brower`는 `Location` 헤더의 `URL`로 요청을 다시 보냅니다.
+
+# `Java`에서 `Redirect`를 구현하는 방법으로 어떤 것이 있나요?
+
+`Java`에서는 `Servlet`을 활용해 `HTTP` 통신 기능을 제공하고 있습니다.
+먼저 `ServletResponse`의 자식 클래스인 `HttpServletResponse`를 활용해 다양한 응답 기능을 제공하는데, `HttpServletResponse`
+의 `sendRedirect(String location)` 메소드를 통해 `Redirect`를 구현할 수 있습니다. 해당 기능은 구현 방식에 따라 조금씩 차이가 있지만, 대부분 서버
+기능은 `WAS:Web Application Server`에 위임하기
+때문에 사용중인 `WAS`에 따라 동작 방식이 다를
+수 있습니다. 하지만 큰 틀에서는 매겨변수로 이동할 URL을 받아 `HttpStatus`를 `3xx`로(대부분 `302:Found`) 설정하고 `Location` 헤더에 `URL`을 설정하는 방식으로 동작합니다.
+
+## 해설
+
+### `HttpServletResponse` 인터페이스의 `sendRedirect(String location)` 메소드
+
+```java
+
+public interface HttpServletResponse extends ServletResponse {
+    ...
+
+    default void sendRedirect(String location) throws IOException {
+        sendRedirect(location, SC_FOUND, true);
+    }
+
+    default void sendRedirect(String location, boolean clearBuffer) throws IOException {
+        sendRedirect(location, SC_FOUND, clearBuffer);
+    }
+
+    default void sendRedirect(String location, int sc) throws IOException {
+        sendRedirect(location, sc, true);
+    }
+
+    void sendRedirect(String location, int sc, boolean clearBuffer) throws IOException;
+    ...
+}
+```
+
+### `Apache Tomcat`에서 `sendRedirect(String location)` 메소드의 동작 방식
+
+```java
+public class Response implements HttpServletResponse {
+    ...
+
+    @Override
+    public void sendRedirect(String location, int status, boolean clearBuffer) throws IOException {
+        if (isCommitted()) {
+            throw new IllegalStateException(sm.getString("coyoteResponse.sendRedirect.ise"));
+        }
+
+        // Ignore any call from an included servlet
+        if (included) {
+            return;
+        }
+
+        // Clear any data content that has been buffered
+        if (clearBuffer) {
+            resetBuffer(true);
+        }
+
+        // Generate a temporary redirect to the specified location
+        try {
+            Context context = getContext();
+            // If no ROOT context is defined, the context can be null.
+            // In this case, the default Tomcat values are assumed, but without
+            // reference to org.apache.catalina.STRICT_SERVLET_COMPLIANCE.
+            String locationUri;
+            // Relative redirects require HTTP/1.1 or later
+            if (getRequest().getCoyoteRequest().getSupportsRelativeRedirects() &&
+                    (context == null || context.getUseRelativeRedirects())) {
+                locationUri = location;
+            } else {
+                locationUri = toAbsolute(location);
+            }
+            setStatus(status);
+            setHeader("Location", locationUri);
+            if (clearBuffer && context != null && context.getSendRedirectBody()) {
+                PrintWriter writer = getWriter();
+                writer.print(sm.getString("coyoteResponse.sendRedirect.note", Escape.htmlElementContent(locationUri)));
+                flushBuffer();
+            }
+        } catch (IllegalArgumentException e) {
+            log.warn(sm.getString("response.sendRedirectFail", location), e);
+            setStatus(SC_NOT_FOUND);
+        }
+
+        // Cause the response to be finished (from the application perspective)
+        setSuspended(true);
+    }
+    ...
+}
+```
+
+### `Jetty`에서 `sendRedirect(String location)` 메소드의 동작 방식
+
+```java
+public class Response implements HttpServletResponse {
+    ...
+
+    public void sendRedirect(int code, String location) throws IOException {
+        sendRedirect(code, location, false);
+    }
+
+    public void sendRedirect(String location, boolean consumeAll) throws IOException {
+        sendRedirect(getHttpChannel().getRequest().getHttpVersion().getVersion() < HttpVersion.HTTP_1_1.getVersion()
+                ? HttpServletResponse.SC_MOVED_TEMPORARILY : HttpServletResponse.SC_SEE_OTHER, location, consumeAll);
+    }
+
+    public void sendRedirect(int code, String location, boolean consumeAll) throws IOException {
+        if (consumeAll)
+            getHttpChannel().ensureConsumeAllOrNotPersistent();
+        if (!HttpStatus.isRedirection(code))
+            throw new IllegalArgumentException("Not a 3xx redirect code");
+
+        if (!isMutable())
+            return;
+
+        if (location == null)
+            throw new IllegalArgumentException();
+
+        if (!URIUtil.hasScheme(location)) {
+            StringBuilder buf = _channel.getHttpConfiguration().isRelativeRedirectAllowed()
+                    ? new StringBuilder()
+                    : _channel.getRequest().getRootURL();
+            if (location.startsWith("/")) {
+                // absolute in context
+                location = URIUtil.canonicalURI(location);
+            } else {
+                // relative to request
+                String path = _channel.getRequest().getRequestURI();
+                String parent = (path.endsWith("/")) ? path : URIUtil.parentPath(path);
+                location = URIUtil.canonicalURI(URIUtil.addEncodedPaths(parent, location));
+                if (location != null && !location.startsWith("/"))
+                    buf.append('/');
+            }
+
+            if (location == null)
+                throw new IllegalStateException("path cannot be above root");
+            buf.append(location);
+
+            location = buf.toString();
+        }
+
+        resetBuffer();
+        setHeader(HttpHeader.LOCATION, location);
+        setStatus(code);
+        closeOutput();
+    }
+
+    @Override
+    public void sendRedirect(String location) throws IOException {
+        sendRedirect(HttpServletResponse.SC_MOVED_TEMPORARILY, location);
+    }
+    ...
+}
+```
